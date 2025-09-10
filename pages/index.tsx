@@ -41,7 +41,21 @@ export default function StaffPage() {
       .eq('date_iso', dateIso)
       .order('sort_no', { ascending: true })
       .then(({ data }) => setRows((data || []) as Row[]))
-      .finally(() => setLoading(false));
+      useEffect(() => {
+  setLoading(true);
+  supabase
+    .from('roster_rows')
+    .select('*')
+    .eq('date_iso', dateIso)
+    .order('time', { ascending: true })
+    .then(({ data, error }) => {
+      if (!error) setRows((data || []) as Row[]);
+    })
+    .catch(err => console.error(err))
+    .finally(() => {
+      setLoading(false);
+    });
+}, [dateIso]);
   }, [dateIso]);
 
   // seskupení
