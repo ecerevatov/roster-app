@@ -1,4 +1,5 @@
 'use client';
+
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabaseClient';
 
@@ -12,6 +13,7 @@ type Row = {
   address: string | null;
   note: string | null;
   group: string | null;
+  sort_no?: number | null;
 };
 
 export default function StaffPage() {
@@ -20,63 +22,66 @@ export default function StaffPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // 1) Načtení publikovaných dnů (jen jednou po mountu)
+  // --- loaders ---
+  async function loadDays() {
+    const { data, error } = await supabase
+      .from('roster_days')
+      .select('date_iso, header')
+      .eq('published', true)
+      .order('date_iso', { ascending: true });
+    if (!error && data) {
+      setDays(data as Day[]);
+      if (!dateIso && data.length) setDateIso(data[data.length - 1].date_iso);
+    }
+  }
+
+  async function loadRows(d = dateIso) {
+    if (!d) return;
+    setLoading(true);
+    const { data, error } = await supabase
+      .from('roster_rows')
+      .select('*')
+      .eq('date_iso', d)
+      .order('sort_no', { ascending: true })
+      .order('time', { ascending: true, nullsFirst: true });
+    if (!error) setRows((data || []) as Row[]);
+    setLoading(false);
+  }
+
+  // --- init days ---
+  useEffect(() => { loadDays(); }, []);
+
+  // --- change day -> load rows ---
+  useEffect(() => { if (dateIso) loadRows(dateIso); }, [dateIso]);
+
+  // --- realtime subscribe ---
   useEffect(() => {
-    let alive = true;
-    (async () => {
-      const { data, error } = await supabase
-        .from('roster_days')
-        .select('date_iso, header')
-        .eq('published', true)
-        .order('date_iso', { ascending: true });
+    const ch = supabase
+      .channel('roster-live-staff')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'roster_rows' },
+        (payload) => {
+          const r: any = payload.new ?? payload.old;
+          if (r?.date_iso === dateIso) loadRows(dateIso);
+        })
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'roster_days' },
+        () => loadDays())
+      .subscribe();
 
-      if (!error && data && alive) {
-        setDays(data as Day[]);
-        const last = data[data.length - 1]?.date_iso;
-        if (last) setDateIso(last);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  // 2) Načtení řádků pro vybraný den
-  useEffect(() => {
-    if (!dateIso) return;
-    let alive = true;
-
-    (async () => {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from('roster_rows')
-        .select('*')
-        .eq('date_iso', dateIso)
-        .order('time', { ascending: true });
-
-      if (!error && alive) setRows((data || []) as Row[]);
-      if (alive) setLoading(false);
-    })();
-
-    return () => {
-      alive = false;
-    };
+    return () => { supabase.removeChannel(ch); };
   }, [dateIso]);
 
-  // 3) Seskupení do sekcí
+  // --- group for view ---
   const groups = useMemo(() => {
-    const by: Record<string, Row[]> = {
-      'Zásobování': [],
-      'Generální úklidy': [],
-      'Ostatní': [],
-    };
-    rows.forEach((r) => {
+    const by: Record<string, Row[]> = { 'Zásobování': [], 'Generální úklidy': [], 'Ostatní': [] };
+    rows.forEach(r => {
       const g = (r.group || '').toLowerCase();
       const key = g === 'zas' ? 'Zásobování' : g === 'uman' ? 'Generální úklidy' : 'Ostatní';
       by[key].push(r);
     });
-    Object.values(by).forEach((list) =>
-      list.sort((a, b) => (a.time || '').localeCompare(b.time || '', 'cs', { numeric: true })),
+    Object.values(by).forEach(list =>
+      list.sort((a, b) => (a.time || '').localeCompare(b.time || '', 'cs', { numeric: true }))
     );
     return by;
   }, [rows]);
@@ -87,11 +92,10 @@ export default function StaffPage() {
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
         <span>Datum:</span>
-        <select value={dateIso} onChange={(e) => setDateIso(e.target.value)}>
-          {days.map((d) => (
+        <select value={dateIso} onChange={e => setDateIso(e.target.value)}>
+          {days.map(d => (
             <option key={d.date_iso} value={d.date_iso}>
-              {d.date_iso}
-              {d.header ? ` • ${d.header}` : ''}
+              {d.date_iso}{d.header ? ` • ${d.header}` : ''}
             </option>
           ))}
         </select>
@@ -100,7 +104,7 @@ export default function StaffPage() {
         </span>
       </div>
 
-      {(['Zásobování', 'Generální úklidy', 'Ostatní'] as const).map((section) => {
+      {(['Zásobování', 'Generální úklidy', 'Ostatní'] as const).map(section => {
         const list = groups[section] || [];
         if (!list.length) return null;
         return (
@@ -109,20 +113,16 @@ export default function StaffPage() {
               {section} • {list.length}
             </h2>
             <div style={{ display: 'grid', gap: 8 }}>
-              {list.map((r) => (
-                <div
-                  key={r.id}
-                  style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 12, background: '#fff' }}
-                >
+              {list.map(r => (
+                <div key={r.id}
+                  style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 12, background: '#fff' }}>
                   <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'baseline' }}>
                     <div style={{ fontWeight: 800 }}>{r.client || ''}</div>
                     <div style={{ opacity: 0.7 }}>{r.time || ''}</div>
                   </div>
                   {r.address ? <div style={{ opacity: 0.8 }}>{r.address}</div> : null}
                   {r.note ? <div style={{ marginTop: 4 }}>{r.note}</div> : null}
-                  {r.worker ? (
-                    <div style={{ marginTop: 6, fontSize: 13, opacity: 0.8 }}>Pracovník: {r.worker}</div>
-                  ) : null}
+                  {r.worker ? <div style={{ marginTop: 6, fontSize: 13, opacity: 0.8 }}>Pracovník: {r.worker}</div> : null}
                 </div>
               ))}
             </div>
