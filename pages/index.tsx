@@ -1,0 +1,106 @@
+'use client';
+import { useEffect, useMemo, useState } from 'react';
+import { supabase } from '../lib/supabaseClient';
+
+type Day = { date_iso: string; header: string | null; };
+type Row = {
+  id: string; date_iso: string;
+  time: string | null; worker: string | null; client: string | null;
+  address: string | null; note: string | null; group: string | null;
+};
+
+export default function StaffPage() {
+  const [days, setDays] = useState<Day[]>([]);
+  const [dateIso, setDateIso] = useState('');
+  const [rows, setRows] = useState<Row[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  // načti dostupné publikované dny
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from('roster_days')
+        .select('date_iso, header')
+        .eq('published', true)
+        .order('date_iso', { ascending: true });
+      if (!error && data) {
+        setDays(data as Day[]);
+        const last = data[data.length - 1]?.date_iso;
+        if (last) setDateIso(last);
+      }
+    })();
+  }, []);
+
+  // načti řádky vybraného dne
+  useEffect(() => {
+    if (!dateIso) return;
+    setLoading(true);
+    supabase
+      .from('roster_rows')
+      .select('*')
+      .eq('date_iso', dateIso)
+      .order('sort_no', { ascending: true })
+      .then(({ data }) => setRows((data || []) as Row[]))
+      .finally(() => setLoading(false));
+  }, [dateIso]);
+
+  // seskupení
+  const groups = useMemo(() => {
+    const by: Record<string, Row[]> = { 'Zásobování': [], 'Generální úklidy': [], 'Ostatní': [] };
+    rows.forEach(r => {
+      const g = (r.group || '').toLowerCase();
+      const key = g === 'zas' ? 'Zásobování' : g === 'uman' ? 'Generální úklidy' : 'Ostatní';
+      by[key].push(r);
+    });
+    Object.values(by).forEach(list =>
+      list.sort((a, b) => (a.time || '').localeCompare(b.time || '', 'cs', { numeric: true }))
+    );
+    return by;
+  }, [rows]);
+
+  return (
+    <div style={{ fontFamily: 'system-ui, sans-serif', padding: 16, maxWidth: 1000, margin: '0 auto' }}>
+      <h1 style={{ fontSize: 24, fontWeight: 800, marginBottom: 8 }}>Rozpis práce • Zaměstnanci</h1>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+        <span>Datum:</span>
+        <select value={dateIso} onChange={e => setDateIso(e.target.value)}>
+          {days.map(d => (
+            <option key={d.date_iso} value={d.date_iso}>
+              {d.date_iso}{d.header ? ` • ${d.header}` : ''}
+            </option>
+          ))}
+        </select>
+        <span style={{ marginLeft: 'auto', opacity: 0.7 }}>
+          {rows.length} objektů {loading ? '• načítám…' : ''}
+        </span>
+      </div>
+
+      {(['Zásobování', 'Generální úklidy', 'Ostatní'] as const).map(section => {
+        const list = groups[section] || [];
+        if (!list.length) return null;
+        return (
+          <section key={section} style={{ marginBottom: 16 }}>
+            <h2 style={{ fontSize: 18, fontWeight: 800, margin: '6px 0' }}>
+              {section} • {list.length}
+            </h2>
+            <div style={{ display: 'grid', gap: 8 }}>
+              {list.map(r => (
+                <div key={r.id}
+                  style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 12, background: '#fff' }}>
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'baseline' }}>
+                    <div style={{ fontWeight: 800 }}>{r.client || ''}</div>
+                    <div style={{ opacity: 0.7 }}>{r.time || ''}</div>
+                  </div>
+                  {r.address ? <div style={{ opacity: 0.8 }}>{r.address}</div> : null}
+                  {r.note ? <div style={{ marginTop: 4 }}>{r.note}</div> : null}
+                  {r.worker ? <div style={{ marginTop: 6, fontSize: 13, opacity: 0.8 }}>Pracovník: {r.worker}</div> : null}
+                </div>
+              ))}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
