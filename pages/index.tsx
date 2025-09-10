@@ -1,134 +1,173 @@
-'use client';
+-- ========= Rozšíření =========
+create extension if not exists "uuid-ossp";
+create extension if not exists "pgcrypto";
 
-import { useEffect, useMemo, useState } from 'react';
-import { supabase } from '../lib/supabaseClient';
+-- ========= Tabulky =========
+create table if not exists profiles (
+  user_id    uuid primary key references auth.users(id) on delete cascade,
+  email      text unique,
+  full_name  text,
+  role       text not null check (role in ('manager','staff')) default 'staff',
+  created_at timestamptz default now()
+);
 
-type Day = { date_iso: string; header: string | null };
-type Row = {
-  id: string;
-  date_iso: string;
-  time: string | null;
-  worker: string | null;
-  client: string | null;
-  address: string | null;
-  note: string | null;
-  group: string | null;
-  sort_no?: number | null;
-};
+create table if not exists change_log (
+  id          bigserial primary key,
+  table_name  text not null,
+  row_id      text,
+  changed_by  uuid,
+  before      jsonb,
+  after       jsonb,
+  changed_at  timestamptz default now()
+);
 
-export default function StaffPage() {
-  const [days, setDays] = useState<Day[]>([]);
-  const [dateIso, setDateIso] = useState('');
-  const [rows, setRows] = useState<Row[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  // --- loaders ---
-  async function loadDays() {
-    const { data, error } = await supabase
-      .from('roster_days')
-      .select('date_iso, header')
-      .eq('published', true)
-      .order('date_iso', { ascending: true });
-    if (!error && data) {
-      setDays(data as Day[]);
-      if (!dateIso && data.length) setDateIso(data[data.length - 1].date_iso);
-    }
-  }
-
-  async function loadRows(d = dateIso) {
-    if (!d) return;
-    setLoading(true);
-    const { data, error } = await supabase
-      .from('roster_rows')
-      .select('*')
-      .eq('date_iso', d)
-      .order('sort_no', { ascending: true })
-      .order('time', { ascending: true, nullsFirst: true });
-    if (!error) setRows((data || []) as Row[]);
-    setLoading(false);
-  }
-
-  // --- init days ---
-  useEffect(() => { loadDays(); }, []);
-
-  // --- change day -> load rows ---
-  useEffect(() => { if (dateIso) loadRows(dateIso); }, [dateIso]);
-
-  // --- realtime subscribe ---
-  useEffect(() => {
-    const ch = supabase
-      .channel('roster-live-staff')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'roster_rows' },
-        (payload) => {
-          const r: any = payload.new ?? payload.old;
-          if (r?.date_iso === dateIso) loadRows(dateIso);
-        })
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'roster_days' },
-        () => loadDays())
-      .subscribe();
-
-    return () => { supabase.removeChannel(ch); };
-  }, [dateIso]);
-
-  // --- group for view ---
-  const groups = useMemo(() => {
-    const by: Record<string, Row[]> = { 'Zásobování': [], 'Generální úklidy': [], 'Ostatní': [] };
-    rows.forEach(r => {
-      const g = (r.group || '').toLowerCase();
-      const key = g === 'zas' ? 'Zásobování' : g === 'uman' ? 'Generální úklidy' : 'Ostatní';
-      by[key].push(r);
-    });
-    Object.values(by).forEach(list =>
-      list.sort((a, b) => (a.time || '').localeCompare(b.time || '', 'cs', { numeric: true }))
-    );
-    return by;
-  }, [rows]);
-
-  return (
-    <div style={{ fontFamily: 'system-ui, sans-serif', padding: 16, maxWidth: 1000, margin: '0 auto' }}>
-      <h1 style={{ fontSize: 24, fontWeight: 800, marginBottom: 8 }}>Rozpis práce • Zaměstnanci</h1>
-
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
-        <span>Datum:</span>
-        <select value={dateIso} onChange={e => setDateIso(e.target.value)}>
-          {days.map(d => (
-            <option key={d.date_iso} value={d.date_iso}>
-              {d.date_iso}{d.header ? ` • ${d.header}` : ''}
-            </option>
-          ))}
-        </select>
-        <span style={{ marginLeft: 'auto', opacity: 0.7 }}>
-          {rows.length} objektů {loading ? '• načítám…' : ''}
-        </span>
-      </div>
-
-      {(['Zásobování', 'Generální úklidy', 'Ostatní'] as const).map(section => {
-        const list = groups[section] || [];
-        if (!list.length) return null;
-        return (
-          <section key={section} style={{ marginBottom: 16 }}>
-            <h2 style={{ fontSize: 18, fontWeight: 800, margin: '6px 0' }}>
-              {section} • {list.length}
-            </h2>
-            <div style={{ display: 'grid', gap: 8 }}>
-              {list.map(r => (
-                <div key={r.id}
-                  style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 12, background: '#fff' }}>
-                  <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'baseline' }}>
-                    <div style={{ fontWeight: 800 }}>{r.client || ''}</div>
-                    <div style={{ opacity: 0.7 }}>{r.time || ''}</div>
-                  </div>
-                  {r.address ? <div style={{ opacity: 0.8 }}>{r.address}</div> : null}
-                  {r.note ? <div style={{ marginTop: 4 }}>{r.note}</div> : null}
-                  {r.worker ? <div style={{ marginTop: 6, fontSize: 13, opacity: 0.8 }}>Pracovník: {r.worker}</div> : null}
-                </div>
-              ))}
-            </div>
-          </section>
-        );
-      })}
-    </div>
+create or replace function log_changes() returns trigger
+language plpgsql as $$
+declare key text;
+begin
+  key := coalesce(
+    to_jsonb(new)->>'id',
+    to_jsonb(old)->>'id',
+    to_jsonb(new)->>'date_iso',
+    to_jsonb(old)->>'date_iso'
   );
-}
+  insert into change_log(table_name,row_id,changed_by,before,after)
+  values (TG_TABLE_NAME, key, auth.uid(), to_jsonb(old), to_jsonb(new));
+  if TG_OP = 'DELETE' then return old; else return new; end if;
+end $$;
+
+create table if not exists roster_days (
+  date_iso   date primary key,
+  header     text,
+  published  boolean default false,
+  updated_at timestamptz default now()
+);
+
+create table if not exists roster_rows (
+  id         uuid primary key default gen_random_uuid(),
+  date_iso   date not null references roster_days(date_iso) on delete cascade,
+  time       text,
+  worker     text,
+  client     text,
+  address    text,
+  note       text,
+  "group"    text,
+  sort_no    int default 0,
+  updated_at timestamptz default now()
+);
+
+-- ========= Triggery =========
+drop trigger if exists trg_roster_days_log on roster_days;
+create trigger trg_roster_days_log
+after insert or update or delete on roster_days
+for each row execute function log_changes();
+
+drop trigger if exists trg_roster_rows_log on roster_rows;
+create trigger trg_roster_rows_log
+after insert or update or delete on roster_rows
+for each row execute function log_changes();
+
+create or replace function set_updated_at() returns trigger
+language plpgsql as $$
+begin
+  new.updated_at := now();
+  return new;
+end $$;
+
+drop trigger if exists trg_days_updated_at on roster_days;
+create trigger trg_days_updated_at
+before update on roster_days
+for each row execute function set_updated_at();
+
+drop trigger if exists trg_rows_updated_at on roster_rows;
+create trigger trg_rows_updated_at
+before update on roster_rows
+for each row execute function set_updated_at();
+
+-- ========= Indexy =========
+create index if not exists idx_rows_date_sort on roster_rows(date_iso, sort_no);
+create index if not exists idx_rows_date_time on roster_rows(date_iso, time);
+create index if not exists idx_days_published on roster_days(published);
+
+-- ========= RLS ON =========
+alter table profiles     enable row level security;
+alter table roster_days  enable row level security;
+alter table roster_rows  enable row level security;
+alter table change_log   enable row level security;
+
+-- ========= Politiky =========
+-- profiles: číst jen přihlášení
+drop policy if exists read_profiles on profiles;
+create policy read_profiles on profiles
+for select using (auth.role() = 'authenticated');
+
+-- roster_days: manažeři čtou vše
+drop policy if exists days_read_managers on roster_days;
+create policy days_read_managers on roster_days
+for select using (
+  exists(select 1 from profiles p where p.user_id = auth.uid() and p.role='manager')
+);
+
+-- roster_days: veřejné čtení jen published
+drop policy if exists days_read_public_published on roster_days;
+create policy days_read_public_published on roster_days
+for select using (published = true);
+
+-- roster_rows: manažeři čtou vše
+drop policy if exists rows_read_managers on roster_rows;
+create policy rows_read_managers on roster_rows
+for select using (
+  exists(select 1 from profiles p where p.user_id = auth.uid() and p.role='manager')
+);
+
+-- roster_rows: veřejné čtení jen pokud den je published
+drop policy if exists rows_read_public_published on roster_rows;
+create policy rows_read_public_published on roster_rows
+for select using (
+  exists(select 1 from roster_days d
+         where d.date_iso = roster_rows.date_iso and d.published = true)
+);
+
+-- ======= Zápis (otevřeno pro anon, ať funguje realtime/autosave) =======
+drop policy if exists public_rows_insert on roster_rows;
+drop policy if exists public_rows_update on roster_rows;
+drop policy if exists public_rows_delete on roster_rows;
+
+create policy public_rows_insert on roster_rows
+for insert with check (true);
+
+create policy public_rows_update on roster_rows
+for update using (true) with check (true);
+
+create policy public_rows_delete on roster_rows
+for delete using (true);
+
+-- roster_days: upsert (ensureDay) potřebuje insert+update
+drop policy if exists public_days_insert on roster_days;
+drop policy if exists public_days_update on roster_days;
+
+create policy public_days_insert on roster_days
+for insert with check (true);
+
+create policy public_days_update on roster_days
+for update using (true) with check (true);
+
+-- change_log: trigger smí vkládat, číst jen manažeři
+drop policy if exists change_log_insert_any on change_log;
+create policy change_log_insert_any on change_log
+for insert with check (true);
+
+drop policy if exists change_log_read_managers on change_log;
+create policy change_log_read_managers on change_log
+for select using (
+  exists(select 1 from profiles p where p.user_id = auth.uid() and p.role='manager')
+);
+
+-- ========= Realtime =========
+do $$ begin
+  alter publication supabase_realtime add table roster_days;
+exception when duplicate_object then null; end $$;
+
+do $$ begin
+  alter publication supabase_realtime add table roster_rows;
+exception when duplicate_object then null; end $$;
