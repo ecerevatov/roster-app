@@ -1,6 +1,8 @@
 'use client';
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
+import Link from 'next/link';
 import { supabase } from '../../lib/supabaseClient';
 
 /* ---------- Typy ---------- */
@@ -17,6 +19,16 @@ type Row = {
 };
 type DayInfo = { date_iso: string; header: string | null; published: boolean | null };
 
+type GCalRow = {
+  time: string | null;
+  worker: string | null;
+  client: string | null;
+  address: string | null;
+  note: string | null;
+  group: string | null;
+};
+type GCalResp = { dateISO: string; rows: GCalRow[] };
+
 /* ---------- Pomocné ---------- */
 const fmtDateCZ = (iso: string) => {
   const d = new Date(iso);
@@ -26,7 +38,8 @@ const fmtDateCZ = (iso: string) => {
   return `${dnames[d.getDay()]} ${dd}.${mm}.${d.getFullYear()}`;
 };
 const todayPlus = (off: number) => {
-  const d = new Date(); d.setDate(d.getDate() + off);
+  const d = new Date();
+  d.setDate(d.getDate() + off);
   return d.toISOString().slice(0, 10);
 };
 const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
@@ -38,14 +51,14 @@ const toMin = (hhmm: string) => {
 const parseRange = (s: string | null) => {
   const m = (s || '').replace(/\s/g, '').match(/^(\d{1,2}:\d{2})[-–](\d{1,2}:\d{2})$/);
   if (!m) return null;
-  const a = toMin(m[1]), b = toMin(m[2]);
+  const a = toMin(m[1]),
+    b = toMin(m[2]);
   if (a == null || b == null) return null;
   return { s: a, e: b };
 };
 const fmtRange = (r: { s: number; e: number }) =>
   `${pad((r.s / 60) | 0)}:${pad(r.s % 60)}–${pad((r.e / 60) | 0)}:${pad(r.e % 60)}`;
-const splitWorkers = (s: string | null) =>
-  (s || '').split(/[,;/\n]+/).map(x => x.trim()).filter(Boolean);
+const splitWorkers = (s: string | null) => (s || '').split(/[,;/\n]+/).map(x => x.trim()).filter(Boolean);
 
 /* ---------- Komponenta ---------- */
 export default function ManagersPage() {
@@ -56,43 +69,41 @@ export default function ManagersPage() {
   const containerRef = useRef<HTMLDivElement>(null);
 
   /* ----- Načtení dne + řádků ----- */
-  useEffect(() => { loadDay(); /* eslint-disable-next-line */ }, [dateIso]);
+  useEffect(() => {
+    loadDay();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateIso]);
 
   async function ensureDay(date: string) {
-    await supabase.from('roster_days')
-      .upsert({ date_iso: date, header: 'Čas', published: true })
-      .select().single();
+    await supabase.from('roster_days').upsert({ date_iso: date, header: 'Čas', published: true }).select().single();
   }
 
   async function loadFromGCal() {
     setLoading(true);
     try {
       const r = await fetch(`/api/gcal?date=${dateIso}`);
-      if (!r.ok) {
-        const txt = await r.text();
-        throw new Error(`GCAL ${r.status}: ${txt}`);
-      }
-      const { rows: gRows } = await r.json();
+      if (!r.ok) throw new Error(`GCAL ${r.status}: ${await r.text()}`);
+      const { rows: gRows } = (await r.json()) as GCalResp;
 
       await supabase.from('roster_days').upsert({ date_iso: dateIso, published: true }).select().single();
       await supabase.from('roster_rows').delete().eq('date_iso', dateIso);
 
       if (Array.isArray(gRows) && gRows.length) {
-        const insertPayload = gRows.map((r: any, i: number) => ({
+        const insertPayload = gRows.map((g, i) => ({
           date_iso: dateIso,
-          time: r.time || null,
-          worker: r.worker || null,
-          client: r.client || null,
-          address: r.address || null,
-          note: r.note || null,
-          group: r.group || null,
+          time: g.time || null,
+          worker: g.worker || null,
+          client: g.client || null,
+          address: g.address || null,
+          note: g.note || null,
+          group: g.group || null,
           sort_no: i,
         }));
         await supabase.from('roster_rows').insert(insertPayload);
       }
       await loadDay();
-    } catch (e:any) {
-      alert(e.message || 'Import z Kalendáře selhal');
+    } catch (e: any) {
+      alert(e?.message || 'Import z Kalendáře selhal');
       console.error(e);
     } finally {
       setLoading(false);
@@ -101,12 +112,11 @@ export default function ManagersPage() {
 
   async function loadDay() {
     setLoading(true);
-    const d = await supabase.from('roster_days')
-      .select('date_iso, header, published')
-      .eq('date_iso', dateIso).maybeSingle();
+    const d = await supabase.from('roster_days').select('date_iso, header, published').eq('date_iso', dateIso).maybeSingle();
     if (!d.error) setDayInfo(d.data as DayInfo);
 
-    const r = await supabase.from('roster_rows')
+    const r = await supabase
+      .from('roster_rows')
       .select('*')
       .eq('date_iso', dateIso)
       .order('time', { ascending: true });
@@ -119,26 +129,32 @@ export default function ManagersPage() {
     if (!dateIso) return;
     const ch = supabase
       .channel(`mgr-rows-${dateIso}`)
-      .on('postgres_changes',
+      .on(
+        'postgres_changes',
         { event: '*', schema: 'public', table: 'roster_rows', filter: `date_iso=eq.${dateIso}` },
-        (payload) => {
+        payload => {
           setRows(prev => {
             if (payload.eventType === 'INSERT') return [...prev, payload.new as Row];
-            if (payload.eventType === 'UPDATE') return prev.map(r => r.id === (payload.new as Row).id ? (payload.new as Row) : r);
+            if (payload.eventType === 'UPDATE') return prev.map(r => (r.id === (payload.new as Row).id ? (payload.new as Row) : r));
             if (payload.eventType === 'DELETE') return prev.filter(r => r.id !== (payload.old as Row).id);
             return prev;
           });
-        })
-      .on('postgres_changes',
+        }
+      )
+      .on(
+        'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'roster_days', filter: `date_iso=eq.${dateIso}` },
-        (payload) => setDayInfo(payload.new as DayInfo))
+        payload => setDayInfo(payload.new as DayInfo)
+      )
       .subscribe();
-    return () => { supabase.removeChannel(ch); };
+    return () => {
+      supabase.removeChannel(ch);
+    };
   }, [dateIso]);
 
   /* ----- Mutace řádků ----- */
   function edit(id: string, key: keyof Row, val: string) {
-    setRows(rs => rs.map(r => r.id === id ? { ...r, [key]: val } : r));
+    setRows(rs => rs.map(r => (r.id === id ? { ...r, [key]: val } : r)));
   }
   const sanitize = (r: Row) => {
     const v = (x: string | null | undefined) => (x && x.trim() !== '' ? x : null);
@@ -159,9 +175,11 @@ export default function ManagersPage() {
     await supabase.from('roster_rows').update(sanitize(r)).eq('id', id);
   }
   async function addRow() {
-    const { data, error } = await supabase.from('roster_rows')
+    const { data, error } = await supabase
+      .from('roster_rows')
       .insert({ date_iso: dateIso, time: null, worker: '', client: '', address: '', note: '', group: null })
-      .select().single();
+      .select()
+      .single();
     if (!error && data) setRows(rs => [...rs, data as Row]);
   }
   async function removeRow(id: string) {
@@ -173,10 +191,7 @@ export default function ManagersPage() {
   const published = !!dayInfo?.published;
   async function togglePublished(next: boolean) {
     await ensureDay(dateIso);
-    const { data, error } = await supabase.from('roster_days')
-      .update({ published: next })
-      .eq('date_iso', dateIso)
-      .select().single();
+    const { data, error } = await supabase.from('roster_days').update({ published: next }).eq('date_iso', dateIso).select().single();
     if (!error && data) setDayInfo(data as DayInfo);
   }
 
@@ -222,7 +237,9 @@ export default function ManagersPage() {
 
   /* ----- Volné kapacity ----- */
   const capacities = useMemo(() => {
-    const WSTART = toMin('06:00')!, WNOON = toMin('12:00')!, WEND = toMin('19:00')!;
+    const WSTART = toMin('06:00')!,
+      WNOON = toMin('12:00')!,
+      WEND = toMin('19:00')!;
     const by: Record<string, { s: number; e: number }[]> = {};
     rows.forEach(r => {
       const rng = parseRange(r.time || '');
@@ -243,13 +260,20 @@ export default function ManagersPage() {
       });
       const free: { s: number; e: number }[] = [];
       let cur = WSTART;
-      merged.forEach(b => { if (b.s > cur) free.push({ s: cur, e: b.s }); cur = Math.max(cur, b.e); });
+      merged.forEach(b => {
+        if (b.s > cur) free.push({ s: cur, e: b.s });
+        cur = Math.max(cur, b.e);
+      });
       if (cur < WEND) free.push({ s: cur, e: WEND });
-      const am: string[] = [], pm: string[] = [];
+      const am: string[] = [],
+        pm: string[] = [];
       free.forEach(r => {
         if (r.e <= WNOON) am.push(fmtRange(r));
         else if (r.s >= WNOON) pm.push(fmtRange(r));
-        else { am.push(fmtRange({ s: r.s, e: WNOON })); pm.push(fmtRange({ s: WNOON, e: r.e })); }
+        else {
+          am.push(fmtRange({ s: r.s, e: WNOON }));
+          pm.push(fmtRange({ s: WNOON, e: r.e }));
+        }
       });
       if (am.length || pm.length) out.push({ name, am: am.join(', ') || '—', pm: pm.join(', ') || '—' });
     });
@@ -260,10 +284,16 @@ export default function ManagersPage() {
   return (
     <div style={{ background: '#f7fafc', minHeight: '100vh', fontFamily: 'Inter, system-ui, -apple-system, Segoe UI, Roboto' }}>
       {/* Header */}
-      <div style={{
-        position: 'sticky', top: 0, zIndex: 10, background: '#ffffffcc',
-        backdropFilter: 'blur(6px)', borderBottom: '1px solid #e5e7eb'
-      }}>
+      <div
+        style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 10,
+          background: '#ffffffcc',
+          backdropFilter: 'blur(6px)',
+          borderBottom: '1px solid #e5e7eb',
+        }}
+      >
         <div style={{ maxWidth: 1600, margin: '0 auto', padding: 12, display: 'grid', gridTemplateColumns: '1fr 620px', gap: 12 }}>
           <div>
             <div style={{ fontWeight: 700 }}>Rozpis práce</div>
@@ -273,21 +303,31 @@ export default function ManagersPage() {
           </div>
           <div id="controls" style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
             <button onClick={loadFromGCal}>Import z Kalendáře</button>
-            <button className="btn btn-primary" onClick={loadDay} style={btnPri}>Aktualizovat</button>
-            <button className="btn btn-outline" onClick={exportPDF} style={btn}>Export to PDF</button>
-            <button className="btn btn-outline" onClick={exportPNG} style={btn}>Export to PNG</button>
-            <label className="btn btn-outline" style={{ ...btn, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <button onClick={loadDay} style={btnPri}>
+              Aktualizovat
+            </button>
+            <button onClick={exportPDF} style={btn}>
+              Export to PDF
+            </button>
+            <button onClick={exportPNG} style={btn}>
+              Export to PNG
+            </button>
+            <label style={{ ...btn, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               <input type="checkbox" checked={published} onChange={e => togglePublished(e.target.checked)} />
               Povolit zobrazení zaměstnancům
             </label>
-            <a href="/" className="btn btn-outline" style={btn}>Režim pro zaměstnance</a>
+            <Link href="/" style={btn}>
+              Režim pro zaměstnance
+            </Link>
           </div>
         </div>
       </div>
 
       {/* Main */}
-      <div ref={containerRef}
-           style={{ maxWidth: 1600, margin: '12px auto', padding: 12, display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 350px', gap: 12 }}>
+      <div
+        ref={containerRef}
+        style={{ maxWidth: 1600, margin: '12px auto', padding: 12, display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 350px', gap: 12 }}
+      >
         {/* Tabulka */}
         <section style={card}>
           <div style={{ overflowX: 'auto' }}>
@@ -304,16 +344,34 @@ export default function ManagersPage() {
               </thead>
               <tbody>
                 {rows.length === 0 && !loading && (
-                  <tr><td colSpan={6} style={{ padding: 12, color: '#64748b' }}>Žádné řádky. Přidej nebo „Aktualizovat“.</td></tr>
+                  <tr>
+                    <td colSpan={6} style={{ padding: 12, color: '#64748b' }}>
+                      Žádné řádky. Přidej nebo „Aktualizovat“.
+                    </td>
+                  </tr>
                 )}
                 {rows.map(r => (
                   <tr key={r.id} style={{ background: '#fff' }}>
-                    <td style={td}><input style={inp} value={r.time || ''} onChange={e => edit(r.id, 'time', e.target.value)} onBlur={() => saveRow(r.id)} /></td>
-                    <td style={td}><input style={inp} value={r.worker || ''} onChange={e => edit(r.id, 'worker', e.target.value)} onBlur={() => saveRow(r.id)} /></td>
-                    <td style={td}><input style={inp} value={r.client || ''} onChange={e => edit(r.id, 'client', e.target.value)} onBlur={() => saveRow(r.id)} /></td>
-                    <td style={td}><input style={inp} value={r.address || ''} onChange={e => edit(r.id, 'address', e.target.value)} onBlur={() => saveRow(r.id)} /></td>
-                    <td style={td}><input style={inp} value={r.note || ''} onChange={e => edit(r.id, 'note', e.target.value)} onBlur={() => saveRow(r.id)} /></td>
-                    <td style={{ ...td, width: 1 }}><button onClick={() => removeRow(r.id)} style={smallDanger}>Smazat</button></td>
+                    <td style={td}>
+                      <input style={inp} value={r.time || ''} onChange={e => edit(r.id, 'time', e.target.value)} onBlur={() => saveRow(r.id)} />
+                    </td>
+                    <td style={td}>
+                      <input style={inp} value={r.worker || ''} onChange={e => edit(r.id, 'worker', e.target.value)} onBlur={() => saveRow(r.id)} />
+                    </td>
+                    <td style={td}>
+                      <input style={inp} value={r.client || ''} onChange={e => edit(r.id, 'client', e.target.value)} onBlur={() => saveRow(r.id)} />
+                    </td>
+                    <td style={td}>
+                      <input style={inp} value={r.address || ''} onChange={e => edit(r.id, 'address', e.target.value)} onBlur={() => saveRow(r.id)} />
+                    </td>
+                    <td style={td}>
+                      <input style={inp} value={r.note || ''} onChange={e => edit(r.id, 'note', e.target.value)} onBlur={() => saveRow(r.id)} />
+                    </td>
+                    <td style={{ ...td, width: 1 }}>
+                      <button onClick={() => removeRow(r.id)} style={smallDanger}>
+                        Smazat
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -321,10 +379,10 @@ export default function ManagersPage() {
           </div>
 
           <div style={{ padding: 8, borderTop: '1px solid #e5e7eb', display: 'flex', gap: 8 }}>
-            <button onClick={addRow} style={btn}>Přidat řádek</button>
-            <div style={{ marginLeft: 'auto', color: '#64748b' }}>
-              {rows.length} položek {loading ? '• načítám…' : ''}
-            </div>
+            <button onClick={addRow} style={btn}>
+              Přidat řádek
+            </button>
+            <div style={{ marginLeft: 'auto', color: '#64748b' }}>{rows.length} položek {loading ? '• načítám…' : ''}</div>
           </div>
         </section>
 
@@ -334,9 +392,12 @@ export default function ManagersPage() {
             <div style={cardTitle}>Počet objektů</div>
             <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
               {counts.map((c, i) => (
-                <li key={c.name + i} style={{ padding: '6px 8px', background: i % 2 ? '#f9fbff' : undefined,
-                  display: 'flex', justifyContent: 'space-between' }}>
-                  <span>{c.name}</span><strong>{c.count}</strong>
+                <li
+                  key={c.name + i}
+                  style={{ padding: '6px 8px', background: i % 2 ? '#f9fbff' : undefined, display: 'flex', justifyContent: 'space-between' }}
+                >
+                  <span>{c.name}</span>
+                  <strong>{c.count}</strong>
                 </li>
               ))}
               {!counts.length && <li style={{ padding: 8, color: '#64748b' }}>Žádná data.</li>}
@@ -362,7 +423,11 @@ export default function ManagersPage() {
                   </tr>
                 ))}
                 {!capacities.length && (
-                  <tr><td colSpan={3} style={{ ...miniTd, color: '#64748b' }}>Žádná data.</td></tr>
+                  <tr>
+                    <td colSpan={3} style={{ ...miniTd, color: '#64748b' }}>
+                      Žádná data.
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>
@@ -372,9 +437,9 @@ export default function ManagersPage() {
 
       {/* Footer */}
       <div style={{
-        position: 'sticky', bottom: 0, zIndex: 10, background: '#ffffffe6',
-        backdropFilter: 'blur(6px)', borderTop: '1px solid #e5e7eb'
-      }}>
+  position: 'sticky', bottom: 0, zIndex: 10, background: '#ffffffe6',
+  backdropFilter: 'blur(6px)', borderTop: '1px solid #e5e7eb'
+}}>
         <div style={{ maxWidth: 1600, margin: '0 auto', padding: 8, display: 'flex', gap: 8, alignItems: 'center', overflowX: 'auto' }}>
           {[1, 2, 3, 4].map(off => {
             const d = todayPlus(off);
@@ -422,7 +487,7 @@ const th = (w?: number): CSSProperties => ({
 const td: CSSProperties = { borderBottom: '1px solid #e5e7eb', padding: 6, verticalAlign: 'middle' };
 const inp: CSSProperties = {
   width: '100%',
-  border: '1px solid #e5e7eb',
+  border: '1px solid #e5e7eb',   // ← tady
   borderRadius: 8,
   padding: '6px 8px',
   font: 'inherit',
@@ -450,10 +515,5 @@ const tabBtn = (active: boolean): CSSProperties => ({
   whiteSpace: 'nowrap',
   cursor: 'pointer',
 });
-const miniTh = (w?: string): CSSProperties =>
-  ({ ...th(), position: 'static', width: w, padding: '6px 8px' });
-const miniTd: CSSProperties = {
-  padding: '6px 8px',
-  borderBottom: '1px solid #e5e7eb',
-  verticalAlign: 'top',
-};
+const miniTh = (w?: string): CSSProperties => ({ ...th(), position: 'static', width: w, padding: '6px 8px' });
+const miniTd: CSSProperties = { padding: '6px 8px', borderBottom: '1px solid #e5e7eb', verticalAlign: 'top' };
