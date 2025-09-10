@@ -316,9 +316,7 @@ export default function ManagersPage() {
               <input type="checkbox" checked={published} onChange={e => togglePublished(e.target.checked)} />
               Povolit zobrazení zaměstnancům
             </label>
-            <Link href="/" style={btn}>
-              Režim pro zaměstnance
-            </Link>
+            <Link href="/" className="btn btn-outline" style={btn}>Režim pro zaměstnance</Link>
           </div>
         </div>
       </div>
