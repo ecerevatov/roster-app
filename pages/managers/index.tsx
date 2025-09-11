@@ -89,25 +89,26 @@ export default function ManagersPage() {
       await supabase.from('roster_rows').delete().eq('date_iso', dateIso);
 
       if (Array.isArray(gRows) && gRows.length) {
-        const insertPayload = gRows.map((g, i) => ({
-          date_iso: dateIso,
-          time: g.time || null,
-          worker: g.worker || null,
-          client: g.client || null,
-          address: g.address || null,
-          note: g.note || null,
-          group: g.group || null,
-          sort_no: i,
-        }));
+        const insertPayload = gRows.map((g: GCalRow, i: number) => ({
+  date_iso: dateIso,
+  time: g.time ?? null,
+  worker: g.worker ?? null,
+  client: g.client ?? null,
+  address: g.address ?? null,
+  note: g.note ?? null,
+  group: g.group ?? null,
+  sort_no: i,
+}));
         await supabase.from('roster_rows').insert(insertPayload);
       }
       await loadDay();
-    } catch (e: any) {
-      alert(e?.message || 'Import z Kalendáře selhal');
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
+    } catch (e: unknown) {
+  const msg = e instanceof Error ? e.message : String(e);
+  alert(msg || 'Import z Kalendáře selhal');
+  console.error(e);
+} finally {
+  setLoading(false);
+}
   }
 
   async function loadDay() {
